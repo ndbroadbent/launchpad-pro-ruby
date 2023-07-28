@@ -56,6 +56,9 @@ lp.set_leds([99, 0])
 @light_onoff = nil
 
 @circleci_build_statuses = nil
+@pipelines = nil
+@workflows = nil
+@test_workflows = nil
 @workflow_states = nil
 
 @modified_light_indexes = {}
@@ -70,24 +73,26 @@ def update_circleci_workflow_states
   pipelines_response = HTTParty.get("https://circleci.com/api/v2/project/gh/" \
     "#{CONFIG.fetch(:circleci_project)}/pipeline" \
     "?circle-token=#{CONFIG.fetch(:circleci_token)}&limit=8")
-  pipelines = JSON.parse(pipelines_response.body)['items']
+  @pipelines = JSON.parse(pipelines_response.body)['items'][0...8]
 
   # Get workflows for each pipeline
   # https://circleci.com/docs/api/v2/#operation/listWorkflowsByPipelineId
-  workflows = pipelines[0...8].map do |pipeline|
+  @workflows = @pipelines.map do |pipeline|
     pipeline_id = pipeline['id']
     workflows_response = HTTParty.get("https://circleci.com/api/v2/pipeline/#{pipeline_id}/workflow" \
         "?circle-token=#{CONFIG.fetch(:circleci_token)}")
     JSON.parse(workflows_response.body)['items']
   end
-  @workflow_states = workflows.map do |w|
-    # puts w.map {|f| f['name']}.inspect
-    # puts w.map {|f| f['status']}.inspect
-    setup_workflow = w[1]
-    test_workflow = w[0]
 
-    next w[0]['status'].to_sym if w.size == 1
-    next :failed unless %w[on_hold success scheduled].include? setup_workflow['status']
+  @test_workflows = []
+  @workflow_states = @workflows.map do |w|
+    # Will only have one workflow when retrying a failed workflow
+    test_workflow = w[0]
+    if w.size == 2
+      setup_workflow = w[1]
+      next :failed unless %w[on_hold success scheduled].include? setup_workflow['status']
+    end
+    @test_workflows << test_workflow
 
     case test_workflow['status'].to_sym
     when :failed, :failing
@@ -107,20 +112,19 @@ def update_circleci_workflow_states
     end
   end
 
-  puts "CircleCI Pipeline Statuses: #{@workflow_states}" #unless $printed_ci_statuses
-  puts "raw states: #{workflows.map {|f| f.map {|g| g['status']}}}" #unless $printed_ci_statuses
-  $printed_ci_statuses = true
+  # puts "CircleCI Pipeline Statuses: #{@workflow_states}" #unless $printed_ci_statuses
+  # puts "raw states: #{workflows.map {|f| f.map {|g| g['status']}}}" #unless $printed_ci_statuses
+  # $printed_ci_statuses = true
 
   @circleci_semaphore.synchronize do
     @circleci_build_statuses = @workflow_states.map do |status|
       case status
       when :running
-        [HALF, HALF, HALF]
+        [0, 0, HALF]
       when :success
         [0, HALF, HALF/4]
       when :failed
-        # orange
-        [HALF, HALF/8, 0]
+        [HALF, 0, 0]
       when :on_hold
         [HALF, 0, HALF]
       else
@@ -222,7 +226,7 @@ end
 Thread.new do
   loop do
     update_circleci_workflow_states
-    sleep 30
+    sleep 10
   end
 end
 
@@ -243,7 +247,7 @@ Thread.new do
             pulse_leds = []
             @workflow_states.each_with_index do |state, index|
               next unless state == :running
-              pulse_leds << [81 + index, 3]
+              pulse_leds << [81 + index, 67]
             end
             lp.set_leds_pulse(pulse_leds) if pulse_leds.any?
           end
@@ -269,6 +273,17 @@ begin
       next if value.zero?
 
       puts "Column: #{column}, row: #{row}, value: #{value}"
+
+      # When presing the top 8 pads, open the @test_workflows in chrome
+      if row == 8 && @test_workflows
+        workflow = @test_workflows[column - 1]
+        next unless workflow
+
+        url = ["https://app.circleci.com/pipelines", workflow['project_slug'], workflow['pipeline_number'], "workflows", workflow['id']].join('/')
+        puts "Opening workflow in Chrome: #{url}"
+        system("open -a 'Google Chrome' '#{url}'")
+        next
+      end
 
       light_index = (row - 1) * 8 + (column - 1)
       next if light_index >= @light_ids.count
