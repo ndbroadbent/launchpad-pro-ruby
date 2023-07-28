@@ -1,0 +1,299 @@
+#!/usr/bin/env ruby
+# launchpad_paint: A simple test of interacting with the Novation Launchpad.
+# The round buttons select the active color. Square pads turn the selected
+# color when pressed.
+#
+# Copyright (c) 2014 Kimmo Kulovesi, http://arkku.com/
+# Use and distribute freely.
+# Mark modified copies as such, do not remove the original attribution.
+# ABSOLUTELY NO WARRANTY - USE AT YOUR OWN RISK ONLY!
+##############################################################################
+require_relative 'kk_launchpad'
+require 'pry-byebug'
+require 'hass/client'
+require 'httparty'
+require 'json'
+
+require 'yaml'
+require 'awesome_print'
+
+CONFIG = YAML.load_file('config.yml').transform_keys(&:to_sym)
+
+@hass_client = Hass::Client.new(CONFIG.fetch(:hass_host), CONFIG.fetch(:hass_port), CONFIG.fetch(:hass_token))
+
+# CircleCi.configure do |config|
+#   config.token = CONFIG.fetch(:circleci_token)
+# end
+# @recent_ci_builds = CircleCi::RecentBuilds.new
+
+MAX = 0x3f
+HALF = MAX / 2
+
+
+lp = LaunchpadMIDI.device(true)
+lp.reset
+
+# Turnn off side LED
+lp.set_leds([99, 0])
+
+# 10x10 grid of RGB values, e.g [[[0, 0, 0], [0, 0, 0], ...], ...]
+# values = Array.new(10) { Array.new(10) { [0, 0, 0] } }
+
+# values[3][3] = [MAX,0,MAX]
+# values[3][6] = [0x1f,0,MAX]
+
+# lp.set_all_leds_rgb values
+# lp.set_leds_pulse [[33, 16], [34, 72]] # Index 33 (3,3), color 16 (green) | Index 34 (3,4), color 72 (red)
+# lp.set_leds_pulse [[33, 72], [34, 16]]
+
+# Set 8 colors and show them on the left round buttons
+# color = COLORS[0]
+# lp.set_leds COLORS.map.with_index { |c,i| [(i + 1)*10, c]}
+# lp.set_leds_pulse [[10  , color]]
+
+@light_ids = nil
+@light_values = nil
+@light_onoff = nil
+
+@circleci_build_statuses = nil
+@workflow_states = nil
+
+@modified_light_indexes = {}
+@modified_light_indexes_semaphore = Mutex.new
+
+@circleci_semaphore = Mutex.new
+
+@needs_ci_update = false
+
+def update_circleci_workflow_states
+  # binding.pry
+  pipelines_response = HTTParty.get("https://circleci.com/api/v2/project/gh/" \
+    "#{CONFIG.fetch(:circleci_project)}/pipeline" \
+    "?circle-token=#{CONFIG.fetch(:circleci_token)}&limit=8")
+  pipelines = JSON.parse(pipelines_response.body)['items']
+
+  # Get workflows for each pipeline
+  # https://circleci.com/docs/api/v2/#operation/listWorkflowsByPipelineId
+  workflows = pipelines[0...8].map do |pipeline|
+    pipeline_id = pipeline['id']
+    workflows_response = HTTParty.get("https://circleci.com/api/v2/pipeline/#{pipeline_id}/workflow" \
+        "?circle-token=#{CONFIG.fetch(:circleci_token)}")
+    JSON.parse(workflows_response.body)['items']
+  end
+  @workflow_states = workflows.map do |w|
+    # puts w.map {|f| f['name']}.inspect
+    # puts w.map {|f| f['status']}.inspect
+    setup_workflow = w[1]
+    test_workflow = w[0]
+
+    next w[0]['status'].to_sym if w.size == 1
+    next :failed unless %w[on_hold success scheduled].include? setup_workflow['status']
+
+    case test_workflow['status'].to_sym
+    when :failed, :failing
+      :failed
+    when :on_hold
+      # Check if any workflow jobs are running. If any are running, return :running, otherwise :on_hold
+      jobs_response = HTTParty.get("https://circleci.com/api/v2/workflow/#{test_workflow['id']}/job" \
+        "?circle-token=#{CONFIG.fetch(:circleci_token)}")
+      jobs = JSON.parse(jobs_response.body)['items']
+      if jobs.any? { |j| j['status'] == 'running'}
+        :running
+      else
+        :on_hold
+      end
+    else
+      test_workflow['status'].to_sym
+    end
+  end
+
+  puts "CircleCI Pipeline Statuses: #{@workflow_states}" #unless $printed_ci_statuses
+  puts "raw states: #{workflows.map {|f| f.map {|g| g['status']}}}" #unless $printed_ci_statuses
+  $printed_ci_statuses = true
+
+  @circleci_semaphore.synchronize do
+    @circleci_build_statuses = @workflow_states.map do |status|
+      case status
+      when :running
+        [HALF, HALF, HALF]
+      when :success
+        [0, HALF, HALF/4]
+      when :failed
+        # orange
+        [HALF, HALF/8, 0]
+      when :on_hold
+        [HALF, 0, HALF]
+      else
+        [HALF, HALF, HALF]
+      end
+    end
+  end
+  @needs_ci_update = true
+end
+
+
+def update_home_assistant_states
+  # Update Home Assistant states
+  @light_states = @hass_client.states.select { |s|
+    s['entity_id'].match?(/^light\./) &&
+      !s['entity_id'].match?(/^light\.zb_/) &&
+      !s['entity_id'].match?(/^light\.all_/) &&
+      !s['entity_id'].match?(/bedside_table/) &&
+      %w[on off].include?(s['state'])
+  }.each_with_object({}) { |s, h| h[s['entity_id']] = s; h }
+
+  if @light_ids.nil?
+    @light_ids = @light_states.keys.sort
+    puts "Found #{@light_states.count} lights"
+  end
+
+  @light_values = @light_ids.map { |entity_id|
+    l = @light_states[entity_id]
+    # Reset IDs if anything changed
+    unless l
+      @light_ids = @light_states.keys.sort
+      next nil
+    end
+
+    if l['state'] == 'on'
+      rgb_color = l.dig('attributes', 'rgb_color')
+      if rgb_color
+        next rgb_color.map { |c| (c / 255.0) * MAX }
+      end
+      next [MAX, MAX, MAX]
+    end
+
+    [0, 0, 0]
+  }.compact
+
+  @modified_light_indexes_semaphore.synchronize do
+    stale_indexes = []
+    @modified_light_indexes.each do |index, data|
+      if data[:updated] < Time.now - 4
+        # puts "Removing modified light value for index #{index}"
+        stale_indexes << index
+        next
+      end
+
+      # puts "Using modified light value for index #{index}"
+      @light_values[index] = data[:value]
+    end
+    @modified_light_indexes.delete_if { |index, _| stale_indexes.include?(index) }
+  end
+
+  @light_onoff = @light_ids.map { |entity_id| @light_states[entity_id]['state'] == 'on' }
+
+  # Make sure all 64 values are set. Set any missing ones to [0,0,0]
+  @light_values += Array.new(64 - @light_values.count) { [0, 0, 0] }
+
+  # Update CircleCI Recent Builds (top 8 LEDs)
+
+  # Set top 8 buttons (indexes 56-64) to CircleCI build statuses
+  return unless @circleci_build_statuses
+
+  @circleci_semaphore.synchronize do
+    @circleci_build_statuses.each_with_index do |status, index|
+      @light_values[56 + index] = status
+    end
+  end
+end
+
+puts "Fetching CircleCI workflow states..."
+update_circleci_workflow_states
+puts "Fetching Home Assistant states..."
+update_home_assistant_states
+@last_updated_lights = Time.now
+lp.set_all_leds_rgb(@light_values, 1)
+
+#ap @light_ids
+
+puts "Starting Launchpad monitoring loop..."
+@needs_light_update = false
+
+Thread.new do
+  loop do
+    # puts "Fetching Home Assistant states..."
+    update_home_assistant_states
+    @needs_light_update = true
+    sleep 0.5
+  end
+end
+
+Thread.new do
+  loop do
+    update_circleci_workflow_states
+    sleep 30
+  end
+end
+
+@previous_light_values = nil
+Thread.new do
+  loop do
+    if @needs_light_update
+      @needs_light_update = false
+
+      if @light_values != @previous_light_values
+        if @needs_ci_update
+          lp.set_all_leds_rgb(@light_values, 1)
+
+          if @workflow_states
+            # Pulse the LED if the workflow state is :running.
+            # Call set_leds_pulse only once.
+            # Note: grid for set_leds_pulse is 10x10, not 8x8
+            pulse_leds = []
+            @workflow_states.each_with_index do |state, index|
+              next unless state == :running
+              pulse_leds << [81 + index, 3]
+            end
+            lp.set_leds_pulse(pulse_leds) if pulse_leds.any?
+          end
+
+          @needs_ci_update = false
+        else
+          # Only update first 7 rows
+          lp.set_all_leds_rgb(@light_values[0...56], 1)
+        end
+
+        @previous_light_values = @light_values
+      end
+    end
+
+    sleep 0.05
+  end
+end
+
+begin
+  loop do
+    lp.each_action do |column, row, value|
+      # Ignore zero values (button release events)
+      next if value.zero?
+
+      puts "Column: #{column}, row: #{row}, value: #{value}"
+
+      light_index = (row - 1) * 8 + (column - 1)
+      next if light_index >= @light_ids.count
+
+      light_id = @light_ids[light_index]
+      puts "Toggling light: #{light_id} (index: #{light_index}))"
+
+      light = @hass_client.light(light_id)
+      light.toggle
+
+      # Update LED immediately
+      if @light_onoff[light_index]
+        @light_values[light_index] = [0, 0, 0]
+      else
+        @light_values[light_index] = [MAX, MAX, MAX]
+      end
+      @modified_light_indexes_semaphore.synchronize do
+        @modified_light_indexes[light_index] = { updated: Time.now, value: @light_values[light_index] }
+      end
+
+      @needs_light_update = true
+    end
+
+    sleep(0.1)
+  end
+ensure
+  lp.reset
+end

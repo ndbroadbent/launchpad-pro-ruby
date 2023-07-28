@@ -1,7 +1,15 @@
-launchpad-ruby
-==============
+launchpad-pro-ruby
+==================
 
-A small library for interacting with the Novation Launchpad MIDI
+> Forked from https://github.com/arkku/launchpad-ruby
+> Hacked to use sysex messages to control LEDs.
+> I just hacked enough together to get it working for my use-case, many features are probably still broken.
+> Using guide from here: https://fael-downloads-prod.focusrite.com/customer/prod/s3fs-public/downloads/Launchpad%20Pro%20Programmers%20Reference%20Guide%201.01.pdf
+> I also included a copy of this PDF in the repo
+
+--------------------------
+
+A small library for interacting with the Novation Launchpad Pro MIDI
 controller using Ruby. Supports basically all features on the Launchpad,
 including LED setting, duty cycle setting, double buffering, flashing,
 and rapid updates.
@@ -30,11 +38,11 @@ for other programs.
 launchpad_game_of_life
 ----------------------
 
-[Conway's Game of Life](http://en.wikipedia.org/wiki/Conway's_Game_of_Life) 
+[Conway's Game of Life](http://en.wikipedia.org/wiki/Conway's_Game_of_Life)
 implemented on a wrap-around 8×8 grid. The round buttons on the side choose
 different color schemes. The top left round button toggles between play/pause,
-and the third and fourth buttons slow down and speed up the game, 
-respectively. The rightmost round button on the top row toggles random cells. 
+and the third and fourth buttons slow down and speed up the game,
+respectively. The rightmost round button on the top row toggles random cells.
 Pressing square pads toggle them between dead/alive (the game may need to be
 paused to actually see effects since a lone cell dies).
 
@@ -131,14 +139,14 @@ between two buffers (e.g., to blink between two states) the parameter
 `false` to `flip_buffers` disables copying of the buffer:
 
     lp.double_buffer = true
-    
+
     # Turn the top left square pad green in the background buffer:
     lp.set_led_colors(0, 0, 0, 3)
     lp.flip_buffers(false)
-    
+
     # Turn the pad red in the _new_ background buffer:
     lp.set_led_colors(0, 0, 3, 0)
-    
+
     # Animate by flipping without copying:
     loop do
       lp.flip_buffers(false)

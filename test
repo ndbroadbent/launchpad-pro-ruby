@@ -1,0 +1,66 @@
+#!/usr/bin/env ruby
+# launchpad_paint: A simple test of interacting with the Novation Launchpad.
+# The round buttons select the active color. Square pads turn the selected
+# color when pressed.
+#
+# Copyright (c) 2014 Kimmo Kulovesi, http://arkku.com/
+# Use and distribute freely.
+# Mark modified copies as such, do not remove the original attribution.
+# ABSOLUTELY NO WARRANTY - USE AT YOUR OWN RISK ONLY!
+##############################################################################
+require_relative 'kk_launchpad'
+require 'pry-byebug'
+
+
+# Set 8 colors and show them on the left round buttons
+COLORS = [
+  3,  # White
+  16, # Green
+  5,  # Red,
+  9,  # Orange,
+  12, # Yellow,
+  40, # Blue,
+  81, # Purple,
+  0  # Black
+]
+
+MAX = 0x3f
+
+lp = LaunchpadMIDI.device(true)
+lp.reset
+
+# 10x10 grid of RGB values, e.g [[[0, 0, 0], [0, 0, 0], ...], ...]
+values = Array.new(10) { Array.new(10) { [0, 0, 0] } }
+
+# values[3][3] = [MAX,0,MAX]
+# values[3][6] = [0x1f,0,MAX]
+
+# lp.set_all_leds_rgb values
+# lp.set_leds_pulse [[33, 16], [34, 72]] # Index 33 (3,3), color 16 (green) | Index 34 (3,4), color 72 (red)
+# lp.set_leds_pulse [[33, 72], [34, 16]]
+
+# Set 8 colors and show them on the left round buttons
+color = COLORS[0]
+lp.set_leds COLORS.map.with_index { |c,i| [(i + 1)*10, c]}
+lp.set_leds_pulse [[10  , color]]
+
+begin
+  loop do
+    lp.each_action do |column, row, value|
+      # puts "column: #{column}, row: #{row}, value: #{value}"
+
+      if column == 0
+        lp.set_leds COLORS.map.with_index { |c,i| [(i + 1)*10, c]}
+        color = COLORS[row - 1]
+        lp.set_leds_pulse [[row * 10, color]]
+        next
+      end
+
+      # lp.set_all_leds_rgb values
+      lp.set_leds [[row * 10 + column, color]]
+    end
+    sleep(0.04)
+  end
+ensure
+  lp.reset
+end

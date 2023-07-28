@@ -46,6 +46,7 @@ class LaunchpadPaint
   end
 
   def paint(column, row, color = colors)
+    puts action.inspect
     i = row * 8 + column
     old_color = @grid[i]
     color = [0,0] if old_color == color
@@ -54,7 +55,7 @@ class LaunchpadPaint
   end
 
   def action(column, row, pressed)
-    return unless pressed
+    return unless column && row && pressed
     if row >= 0 && column < 8
       paint(column, row)
     else

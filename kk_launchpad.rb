@@ -16,6 +16,7 @@
 # ABSOLUTELY NO WARRANTY - USE AT YOUR OWN RISK ONLY!
 ##############################################################################
 require 'rubygems'
+require 'logger'
 require 'unimidi'
 
 class LaunchpadMIDI
@@ -52,18 +53,25 @@ class LaunchpadMIDI
   attr_accessor :midi_to
   attr_accessor :midi_from
 
-  def initialize(midi_out, midi_in = nil)
+  def initialize(midi_out, midi_in = nil, debug = false)
     @midi_from = midi_in
     @midi_to = midi_out
     @last_command = nil
     @mapping = :xy
     @double_buffer = false
     @offline_updates = nil
+    @logger = Logger.new(STDERR)
+    @logger = Logger.new(STDERR)
+    @logger.level = debug ? Logger::DEBUG : Logger::INFO
+    @logger.debug('Initialized LaunchpadMIDI')
   end
 
   # Reset the Launchpad to default settings with all LEDs off
   def reset
-    send_midi(0xB0, 0x00, 0x00)
+    @logger.debug('Reset Launchpad to default settings with all LEDs off')
+    # send_midi(0xB0, 0x00, 0x00)
+    send_midi(0xF0, 0x00, 0x20, 0x29, 0x02, 0x10, 0x0E, 0x00, 0xF7)
+
     @last_command = nil
     @mapping = :xy
     @double_buffer = false
@@ -100,6 +108,7 @@ class LaunchpadMIDI
   #   numerator   1..16
   #   denominator 3..18
   def set_duty_cycle(numerator, denominator)
+    @logger.debug("Set LED duty cycle to #{numerator}/#{denominator}")
     if numerator < 1
       numerator = 1
     elsif numerator > 16
@@ -128,6 +137,7 @@ class LaunchpadMIDI
   # Row -1 is the top row of round buttons.
   # Column 8 is the rightmost column of round buttons.
   def set_led(column, row, bits)
+    @logger.debug("Set LED at (#{column}, #{row}) to #{bits}")
     if column < 0
       column = 0
     elsif column > 8
@@ -149,8 +159,40 @@ class LaunchpadMIDI
     end
   end
 
+  # Grid types:
+  # 0 = 10x10 grid
+  # 1 = 8x8 grid (only square pads)
+  def set_all_leds_rgb(values, grid_type = 0)
+    # F0h 00h 20h 29h 02h 10h 0Fh <Grid Type> <Red> <Green> <Blue> ... F7h
+    flattened_values = values.flatten
+    # raise ArgumentError, 'values must be an array of 100 RGB values' unless flattened_values.length == 10 * 10 * 3
+    command = [0xF0, 0x00, 0x20, 0x29, 0x02, 0x10, 0x0F, grid_type, *values.flatten, 0xF7]
+    send_midi(*command)
+  end
+
+  def set_leds_sysex(led_type, values)
+    flattened_values = values.flatten
+    command = [0xF0, 0x00, 0x20, 0x29, 0x02, 0x10, led_type, *values.flatten, 0xF7]
+    send_midi(*command)
+  end
+
+  def set_leds(values)
+    # F0h 00h 20h 29h 02h 10h 0Ah <LED> <Colour> F7h
+    set_leds_sysex(0x0A, values)
+  end
+
+  def set_leds_pulse(values)
+    # F0h 00h 20h 29h 02h 10h 28h <LED> <Colour> ... F7h
+    set_leds_sysex(0x28, values)
+  end
+
+  def set_leds_flash(values)
+    # F0h 00h 20h 29h 02h 10h 23h <LED> <Colour> F7h
+    set_leds_sysex(0x23, values)
+  end
+
   # Set a LED to given red and green brightness (both 0..3)
-  def set_led_colors(column, row, red, green, flash = false)
+  def set_led_colors(column, row, red, green, blue, flash = false)
     bits = ((green & 0x03) << 4) | (red & 0x03)
     bits |= (flash ? 0x08 : (@double_buffer ? 0x00 : 0x0C))
     set_led(column, row, bits)
@@ -164,11 +206,13 @@ class LaunchpadMIDI
   # Turn off all LEDs (resetting also turns them off, but this keeps
   # other settings and supports offline updates)
   def set_all_off
+    @logger.debug('#set_all_off - Turn off all LEDs')
     data = Array.new(80, (@double_buffer ? 0x00 : 0x0C))
     if @offline_updates
       @offline_updates = data
     else
-      send_midi(0x92, *data)
+      # send_midi(0x92, *data)
+      send_midi(0xF0, 0x00, 0x20, 0x29, 0x02, 0x10, 0x0E, 0x00, 0xF7)
     end
   end
 
@@ -232,7 +276,7 @@ class LaunchpadMIDI
       @offline_updates = nil
     end
   end
-  
+
   # Is offline update enabled?
   def offline_updates?
     @offline_updates ? true : false
@@ -289,12 +333,21 @@ class LaunchpadMIDI
   # before passing the message to this method, i.e., the message must begin
   # with a status byte and be followed only by value bytes.)
   def parse_midi_message(msg)
+    @logger.debug("Parse MIDI message: #{msg.map { |b| ("0x%.2x" % b).upcase }.join(', ')} | msg[1] = #{msg[1]}")
     pressed = ((msg[2] || 0) >= 64)
     case msg[0]
-    when 0x90
-      return *xy_for_note(msg[1]), pressed
-    when 0xB0
-      return *xy_for_controller(msg[1]), pressed
+    # when 0x90
+    #   return *xy_for_note(msg[1]), pressed
+    # when 0xB0
+    #   return *xy_for_controller(msg[1]), pressed
+    when 0x90, 0xB0
+      # 0x01 = Bottom row, bottom left round button
+      # 0x08 = Bottom row, bottom right round button
+      # 0X0A = Left column, bottom round button
+      # 0X0B = Bottom left square pad
+      column = msg[1] % 10
+      row = msg[1] / 10
+      return column, row, msg[2]
     when 0xF0
       launchpad_id = nil
       if msg.length >= 10 && msg[1] == 0x7E && msg[3] == 0x06
@@ -343,7 +396,7 @@ class LaunchpadMIDI
 
   # Send a MIDI command to the Launchpad
   def send_midi(command, *data)
-    if @last_command.nil? || @last_command != command
+    if @last_command.nil? || @last_command == 0xF0 || @last_command != command
       @midi_to.puts(command, *data)
       @last_command = command
     else
@@ -384,10 +437,10 @@ class LaunchpadMIDI
 
   # Instance for an automatically discovered Launchpad, or nil if
   # one isn't found`
-  def LaunchpadMIDI.device
+  def LaunchpadMIDI.device(debug = false)
     output, input = find_output_and_input
     if input && output
-      LaunchpadMIDI.new(output, input)
+      LaunchpadMIDI.new(output, input, debug)
     else
       nil
     end
@@ -397,7 +450,7 @@ end
 
 
 if __FILE__ == $0
-  lp = LaunchpadMIDI.device
+  lp = LaunchpadMIDI.device(true)
   unless lp
     $stderr.puts 'Error: No Launchpad device connected?'
     exit 1
