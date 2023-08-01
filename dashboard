@@ -188,7 +188,7 @@ def update_home_assistant_states
   @light_onoff = @light_ids.map { |entity_id| @light_states[entity_id]['state'] == 'on' }
 
   # Make sure all 64 values are set. Set any missing ones to [0,0,0]
-  @light_values += Array.new(64 - @light_values.count) { [0, 0, 0] }
+  @light_values += Array.new([0, 64 - @light_values.count].max) { [0, 0, 0] }
 
   # Update CircleCI Recent Builds (top 8 LEDs)
 
