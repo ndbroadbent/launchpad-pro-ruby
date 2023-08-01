@@ -317,6 +317,9 @@ begin
         next
       end
 
+      next unless row >= 1 && row <= 8
+      next unless column >= 1 && column <= 8
+
       light_index = (row - 1) * 8 + (column - 1)
       next if light_index >= @light_ids.count
 
