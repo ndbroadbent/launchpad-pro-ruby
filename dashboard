@@ -68,6 +68,8 @@ lp.set_leds([99, 0])
 
 @needs_ci_update = false
 
+@active = false
+
 def update_circleci_workflow_states
   # binding.pry
   pipelines_response = HTTParty.get("https://circleci.com/api/v2/project/gh/" \
@@ -137,8 +139,9 @@ end
 
 
 def update_home_assistant_states
+  ha_states = @hass_client.states
   # Update Home Assistant states
-  @light_states = @hass_client.states.select { |s|
+  @light_states = ha_states.select { |s|
     s['entity_id'].match?(/^light\./) &&
       !s['entity_id'].match?(/^light\.zb_/) &&
       !s['entity_id'].match?(/^light\.all_/) &&
@@ -146,12 +149,24 @@ def update_home_assistant_states
       %w[on off].include?(s['state'])
   }.each_with_object({}) { |s, h| h[s['entity_id']] = s; h }
 
+  computer_active_state = ha_states.find { |s| s['entity_id'] == 'input_boolean.nathan_on_computer_in_office' }
+  current_computer_active = (computer_active_state['state'] == 'on')
+  if @active != current_computer_active
+    @active = current_computer_active
+
+    @needs_light_update = true
+    @previous_light_values = nil
+    @needs_ci_update = true
+    @lights_turned_off = false
+  end
+
   if @light_ids.nil?
     @light_ids = @light_states.keys.sort
     puts "Found #{@light_states.count} lights"
   end
 
-  @light_values = @light_ids.map { |entity_id|
+  max_light_values = 64 - 8
+  @light_values = @light_ids[0...max_light_values].map { |entity_id|
     l = @light_states[entity_id]
     # Reset IDs if anything changed
     unless l
@@ -202,8 +217,8 @@ def update_home_assistant_states
   end
 end
 
-puts "Fetching CircleCI workflow states..."
-update_circleci_workflow_states
+# puts "Fetching CircleCI workflow states..."
+# update_circleci_workflow_states
 puts "Fetching Home Assistant states..."
 update_home_assistant_states
 @last_updated_lights = Time.now
@@ -225,16 +240,33 @@ end
 
 Thread.new do
   loop do
-    update_circleci_workflow_states
-    sleep 10
+    if @active
+      update_circleci_workflow_states
+      sleep 10
+    else
+      sleep 1
+    end
   end
 end
+
+@lights_turned_off = false
 
 @previous_light_values = nil
 Thread.new do
   loop do
     if @needs_light_update
       @needs_light_update = false
+
+      if !@active
+        if !@lights_turned_off
+          puts "Computer not active, turning off lights..."
+          lp.reset
+          @lights_turned_off = true
+        end
+        next
+      end
+
+      @lights_turned_off = false
 
       if @light_values != @previous_light_values
         if @needs_ci_update
@@ -270,7 +302,7 @@ begin
   loop do
     lp.each_action do |column, row, value|
       # Ignore zero values (button release events)
-      next if value.zero?
+      next if value.zero? || !@active
 
       puts "Column: #{column}, row: #{row}, value: #{value}"
 
