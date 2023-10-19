@@ -32,6 +32,7 @@ GEM
       midi-winmm (~> 0.1, >= 0.1.10)
 
 PLATFORMS
+  arm64-darwin-22
   x86_64-darwin-22
 
 DEPENDENCIES
