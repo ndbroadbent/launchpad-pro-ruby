@@ -104,10 +104,18 @@ def update_circleci_workflow_states
       jobs_response = HTTParty.get("https://circleci.com/api/v2/workflow/#{test_workflow['id']}/job" \
         "?circle-token=#{CONFIG.fetch(:circleci_token)}")
       jobs = JSON.parse(jobs_response.body)['items']
-      if jobs.any? { |j| j['status'] == 'running'}
+
+      if jobs.any? { |j| j['status'] == 'running' }
         :running
       else
-        :on_hold
+        on_hold_job_names =  jobs.select { |j| j['status'] == 'on_hold' }.map { |j| j['name'] }
+
+        # Job is successful if the only jobs on hold are approval jobs        
+        if on_hold_job_names.all? { |n| n.match?(/^approve_/) }
+          :success
+        else
+          :on_hold
+        end
       end
     else
       test_workflow['status'].to_sym
@@ -136,7 +144,6 @@ def update_circleci_workflow_states
   end
   @needs_ci_update = true
 end
-
 
 def update_home_assistant_states
   ha_states = @hass_client.states
