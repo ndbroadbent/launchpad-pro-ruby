@@ -1,3 +1,4 @@
 .bundle
 config.yml
 light_entities.yml
+*.log
