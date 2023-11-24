@@ -36,6 +36,34 @@ lp.reset
 # Turnn off side LED
 lp.set_leds([99, 0])
 
+HOUSE_LIGHTS_ARRANGEMENT = [
+  [ nil,       nil,       nil,       :b_deck,   :b_deck,   :ensuite,  :bedroom,  :bedroom ],
+  [ :f_deck,   :nook,     :kitchen,  :dining,   :laundry,  :closet,   :bedroom,  :bedroom ],
+  [ :f_deck,   :living,   :living,   :entrance, :hallway,  :hallway,  :hallway,  :hallway ],
+  [ :f_deck,   :living,   :living,   :f_door,   :m_office, :toilet,   :bathroom, :n_office ]
+].reverse.flatten.freeze
+
+HOUSE_LIGHTS_MAPPING = {
+  b_deck: :all_back_deck_lights,
+  f_deck: :all_front_deck_lights,
+  ensuite: :all_ensuite_lights,
+  bedroom: :all_bedroom_lights,
+  nook: :all_reading_nook_lights,
+  kitchen: :all_kitchen_lights,
+  dining: :all_dining_room_lights,
+  laundry: :all_laundry_lights,
+  closet: :all_bedroom_closet_lights,
+  living: :all_living_room_lights,
+  entrance: :all_entrance_lights,
+  hallway: :all_hallway_lights,
+  f_door: :front_door_light,
+  m_office: :mashas_office_light,
+  toilet: :toilet_light,
+  bathroom: :all_bathroom_lights,
+  n_office: :nathans_office_light
+}
+
+
 # 10x10 grid of RGB values, e.g [[[0, 0, 0], [0, 0, 0], ...], ...]
 # values = Array.new(10) { Array.new(10) { [0, 0, 0] } }
 
@@ -150,9 +178,6 @@ def update_home_assistant_states
   # Update Home Assistant states
   @light_states = ha_states.select { |s|
     s['entity_id'].match?(/^light\./) &&
-      !s['entity_id'].match?(/^light\.zb_/) &&
-      !s['entity_id'].match?(/^light\.all_/) &&
-      !s['entity_id'].match?(/bedside_table/) &&
       %w[on off].include?(s['state'])
   }.each_with_object({}) { |s, h| h[s['entity_id']] = s; h }
 
@@ -172,25 +197,57 @@ def update_home_assistant_states
     puts "Found #{@light_states.count} lights"
   end
 
-  max_light_values = 64 - 8
-  @light_values = @light_ids[0...max_light_values].map { |entity_id|
-    l = @light_states[entity_id]
-    # Reset IDs if anything changed
-    unless l
-      @light_ids = @light_states.keys.sort
-      next nil
-    end
+  # max_light_values = 64 - 8
+  # @light_values = @light_ids[0...max_light_values].map { |entity_id|
+  #   l = @light_states[entity_id]
+  #   # Reset IDs if anything changed
+  #   unless l
+  #     @light_ids = @light_states.keys.sort
+  #     next nil
+  #   end
+
+  #   if l['state'] == 'on'
+  #     rgb_color = l.dig('attributes', 'rgb_color')
+  #     if rgb_color
+  #       next rgb_color.map { |c| (c / 255.0) * MAX }
+  #     end
+  #     next [MAX, MAX, MAX]
+  #   end
+
+  #   [0, 0, 0]
+  # }.compact
+
+  light_mapping_states = {}
+  HOUSE_LIGHTS_MAPPING.each do |arr_name, entity|
+    entity_id = "light.#{entity}"
+    next unless @light_states[entity_id]
+    light_mapping_states[arr_name] = @light_states[entity_id]
+  end
+
+  @light_values = HOUSE_LIGHTS_ARRANGEMENT.map do |arr_name|
+    next [0,0,0] unless arr_name
+
+    light_name = HOUSE_LIGHTS_MAPPING[arr_name]
+    entity_id = "light.#{light_name}"
+    light_state = @light_states[entity_id]
+
+    next [0,0,0] unless arr_name && light_mapping_states[arr_name]
+    l = light_mapping_states[arr_name]
 
     if l['state'] == 'on'
       rgb_color = l.dig('attributes', 'rgb_color')
       if rgb_color
-        next rgb_color.map { |c| (c / 255.0) * MAX }
+        rgb_color.map { |c| (c / 255.0) * MAX }
+      else
+        [MAX, MAX, MAX]
       end
-      next [MAX, MAX, MAX]
+    else
+      [0, 0, 0]
     end
+  end
 
-    [0, 0, 0]
-  }.compact
+  # @light_onoff = @light_ids.map { |entity_id| @light_states&.dig(entity_id, 'state') == 'on' }
+  @light_onoff = @light_values.map { |rgb| rgb != [0, 0, 0] }
 
   @modified_light_indexes_semaphore.synchronize do
     stale_indexes = []
@@ -206,8 +263,6 @@ def update_home_assistant_states
     end
     @modified_light_indexes.delete_if { |index, _| stale_indexes.include?(index) }
   end
-
-  @light_onoff = @light_ids.map { |entity_id| @light_states&.dig(entity_id, 'state') == 'on' }
 
   # Make sure all 64 values are set. Set any missing ones to [0,0,0]
   @light_values += Array.new([0, 64 - @light_values.count].max) { [0, 0, 0] }
@@ -328,22 +383,30 @@ begin
       next unless column >= 1 && column <= 8
 
       light_index = (row - 1) * 8 + (column - 1)
-      next if light_index >= @light_ids.count
+      next if light_index >= HOUSE_LIGHTS_ARRANGEMENT.count
 
-      light_id = @light_ids[light_index]
-      puts "Toggling light: #{light_id} (index: #{light_index}))"
+      light_arr_name = HOUSE_LIGHTS_ARRANGEMENT[light_index]
+      next unless light_arr_name
 
-      light = @hass_client.light(light_id)
-      light.toggle
+      light_entity_id = "light.#{HOUSE_LIGHTS_MAPPING[light_arr_name]}"
 
-      # Update LED immediately
-      if @light_onoff[light_index]
-        @light_values[light_index] = [0, 0, 0]
-      else
-        @light_values[light_index] = [MAX, MAX, MAX]
-      end
+      puts "Toggling light: #{light_entity_id} (index: #{light_index}))"
+      light = @hass_client.light(light_entity_id)
+      light.toggle        
+
+      # Update all LEDs immediately
       @modified_light_indexes_semaphore.synchronize do
-        @modified_light_indexes[light_index] = { updated: Time.now, value: @light_values[light_index] }
+        HOUSE_LIGHTS_ARRANGEMENT.each_with_index do |arr_name, arr_index|
+          next unless arr_name == light_arr_name
+
+          if @light_onoff[light_index]
+            @light_values[arr_index] = [0, 0, 0]
+          else
+            @light_values[arr_index] = [MAX, MAX, MAX]
+          end
+
+          @modified_light_indexes[arr_index] = { updated: Time.now, value: @light_values[arr_index] }
+        end
       end
 
       @needs_light_update = true
